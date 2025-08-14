@@ -1,73 +1,108 @@
+import { Property } from "@/types";
+import { openAuthSessionAsync } from "expo-web-browser";
 import {
-  Client,
   Account,
-  ID,
+  Avatars,
+  Client,
   Databases,
   OAuthProvider,
-  Avatars,
   Query,
-  Storage,
 } from "react-native-appwrite";
-import * as Linking from "expo-linking";
-import { openAuthSessionAsync } from "expo-web-browser";
 
 export const config = {
-  platform: "com.jsm.restate",
-  endpoint: process.env.EXPO_PUBLIC_APPWRITE_ENDPOINT,
-  projectId: process.env.EXPO_PUBLIC_APPWRITE_PROJECT_ID,
-  databaseId: process.env.EXPO_PUBLIC_APPWRITE_DATABASE_ID,
+  platform: "com.primesquare.app",
+  endpoint:
+    process.env.EXPO_PUBLIC_APPWRITE_ENDPOINT || "https://cloud.appwrite.io/v1",
+  projectId: process.env.EXPO_PUBLIC_APPWRITE_PROJECT_ID || "",
+  databaseId: process.env.EXPO_PUBLIC_APPWRITE_DATABASE_ID || "",
   galleriesCollectionId:
-    process.env.EXPO_PUBLIC_APPWRITE_GALLERIES_COLLECTION_ID,
-  reviewsCollectionId: process.env.EXPO_PUBLIC_APPWRITE_REVIEWS_COLLECTION_ID,
-  agentsCollectionId: process.env.EXPO_PUBLIC_APPWRITE_AGENTS_COLLECTION_ID,
+    process.env.EXPO_PUBLIC_APPWRITE_GALLERIES_COLLECTION_ID || "",
+  reviewsCollectionId:
+    process.env.EXPO_PUBLIC_APPWRITE_REVIEWS_COLLECTION_ID || "",
+  agentsCollectionId:
+    process.env.EXPO_PUBLIC_APPWRITE_AGENTS_COLLECTION_ID || "",
   propertiesCollectionId:
-    process.env.EXPO_PUBLIC_APPWRITE_PROPERTIES_COLLECTION_ID,
-  bucketId: process.env.EXPO_PUBLIC_APPWRITE_BUCKET_ID,
+    process.env.EXPO_PUBLIC_APPWRITE_PROPERTIES_COLLECTION_ID || "",
 };
 
 export const client = new Client();
-client
-  .setEndpoint(config.endpoint!)
-  .setProject(config.projectId!)
-  .setPlatform(config.platform!);
+
+if (config.endpoint && config.projectId) {
+  client
+    .setEndpoint(config.endpoint)
+    .setProject(config.projectId)
+    .setPlatform(config.platform);
+}
 
 export const avatar = new Avatars(client);
 export const account = new Account(client);
 export const databases = new Databases(client);
-export const storage = new Storage(client);
 
 export async function login() {
   try {
-    const redirectUri = Linking.createURL("/");
+    // Try multiple redirect URIs for better compatibility
+    const possibleRedirectURIs = [
+      "primesquare://auth",
+      "primesquare://",
+      "primesquare://oauth",
+    ];
 
-    const response = await account.createOAuth2Token(
-      OAuthProvider.Google,
-      redirectUri
-    );
-    if (!response) throw new Error("Create OAuth2 token failed");
+    let loginSuccess = false;
 
-    const browserResult = await openAuthSessionAsync(
-      response.toString(),
-      redirectUri
-    );
-    if (browserResult.type !== "success")
-      throw new Error("Create OAuth2 token failed");
+    for (const redirectUri of possibleRedirectURIs) {
+      try {
+        console.log("Trying Redirect URI:", redirectUri);
 
-    const url = new URL(browserResult.url);
-    const secret = url.searchParams.get("secret")?.toString();
-    const userId = url.searchParams.get("userId")?.toString();
-    if (!secret || !userId) throw new Error("Create OAuth2 token failed");
+        const response = await account.createOAuth2Token(
+          OAuthProvider.Google,
+          redirectUri
+        );
+        if (!response) continue;
 
-    const session = await account.createSession(userId, secret);
-    if (!session) throw new Error("Failed to create session");
+        const browserResult = await openAuthSessionAsync(
+          response.toString(),
+          redirectUri
+        );
 
-    return true;
+        if (browserResult.type === "dismiss") {
+          console.log("User dismissed the login");
+          return false;
+        }
+
+        if (browserResult.type !== "success") {
+          console.error("Browser result:", browserResult);
+          continue;
+        }
+
+        const url = new URL(browserResult.url);
+        const secret = url.searchParams.get("secret")?.toString();
+        const userId = url.searchParams.get("userId")?.toString();
+        if (!secret || !userId) {
+          console.error(
+            "Missing parameters in callback URL:",
+            browserResult.url
+          );
+          continue;
+        }
+
+        const session = await account.createSession(userId, secret);
+        if (session) {
+          console.log("Login successful with URI:", redirectUri);
+          loginSuccess = true;
+          break;
+        }
+      } catch (uriError) {
+        console.log(`Failed with ${redirectUri}:`, uriError);
+        continue;
+      }
+    }
+
+    return loginSuccess;
   } catch (error) {
-    console.error(error);
+    console.error("Login error:", error);
     return false;
   }
 }
-
 export async function logout() {
   try {
     const result = await account.deleteSession("current");
@@ -91,21 +126,31 @@ export async function getCurrentUser() {
     }
 
     return null;
-  } catch (error) {
-    console.log(error);
+  } catch (error: any) {
+    // Handle specific error cases
+    if (error?.code === 401 || error?.type === "general_unauthorized_scope") {
+      console.log("User not authenticated");
+      return null;
+    }
+    console.log("Error getting current user:", error);
     return null;
   }
 }
 
-export async function getLatestProperties() {
+export async function getLatestProperties(): Promise<Property[]> {
   try {
+    if (!config.databaseId || !config.propertiesCollectionId) {
+      console.warn("Database configuration missing");
+      return [];
+    }
+
     const result = await databases.listDocuments(
-      config.databaseId!,
-      config.propertiesCollectionId!,
+      config.databaseId,
+      config.propertiesCollectionId,
       [Query.orderAsc("$createdAt"), Query.limit(5)]
     );
 
-    return result.documents;
+    return result.documents as unknown as Property[];
   } catch (error) {
     console.error(error);
     return [];
@@ -120,8 +165,13 @@ export async function getProperties({
   filter: string;
   query: string;
   limit?: number;
-}) {
+}): Promise<Property[]> {
   try {
+    if (!config.databaseId || !config.propertiesCollectionId) {
+      console.warn("Database configuration missing");
+      return [];
+    }
+
     const buildQuery = [Query.orderDesc("$createdAt")];
 
     if (filter && filter !== "All")
@@ -139,12 +189,12 @@ export async function getProperties({
     if (limit) buildQuery.push(Query.limit(limit));
 
     const result = await databases.listDocuments(
-      config.databaseId!,
-      config.propertiesCollectionId!,
+      config.databaseId,
+      config.propertiesCollectionId,
       buildQuery
     );
 
-    return result.documents;
+    return result.documents as unknown as Property[];
   } catch (error) {
     console.error(error);
     return [];
@@ -152,17 +202,25 @@ export async function getProperties({
 }
 
 // write function to get property by id
-export async function getPropertyById({ id }: { id: string }) {
+export async function getPropertyById({
+  id,
+}: {
+  id: string;
+}): Promise<Property | null> {
   try {
+    if (!config.databaseId || !config.propertiesCollectionId) {
+      console.warn("Database configuration missing");
+      return null;
+    }
+
     const result = await databases.getDocument(
-      config.databaseId!,
-      config.propertiesCollectionId!,
+      config.databaseId,
+      config.propertiesCollectionId,
       id
     );
-    return result;
+    return result as unknown as Property;
   } catch (error) {
     console.error(error);
     return null;
   }
 }
-  

@@ -51,7 +51,7 @@ const Home = () => {
       query: params.query!,
       limit: 6,
     });
-  }, [params.filter, params.query]);
+  }, [params.filter, params.query, refetch]);
 
   const handleCardPress = (id: string) => router.push(`/properties/${id}`);
 
